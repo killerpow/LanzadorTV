@@ -10,12 +10,26 @@ android {
         applicationId 'com.lanzador.tv'
         minSdk 21
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode Integer.parseInt(System.getenv('VERSION_CODE') ?: '1')
+        versionName '1.' + (System.getenv('VERSION_CODE') ?: '0')
     }
 
-    buildTypes {
-        release { minifyEnabled false }
+
+    // Firma fija: solo si GitHub tiene guardado el secreto FIRMA_B64 (así las
+    // actualizaciones se instalan encima sin borrar los datos)
+    def firma = rootProject.file('firma.jks')
+    if (firma.exists()) {
+        signingConfigs {
+            fija {
+                storeFile firma
+                storePassword System.getenv('FIRMA_PASS')
+                keyAlias 'apps'
+                keyPassword System.getenv('FIRMA_PASS')
+            }
+        }
+        buildTypes {
+            debug { signingConfig signingConfigs.fija }
+        }
     }
 
     compileOptions {

@@ -19,7 +19,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Preparar firma (si existe el secreto)
+        env:
+          FIRMA_B64: ${{ secrets.FIRMA_B64 }}
+        run: if [ -n "$FIRMA_B64" ]; then echo "$FIRMA_B64" | base64 -d > firma.jks; echo "Firma fija"; else echo "Sin firma fija"; fi
       - name: Compilar
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          FIRMA_PASS: ${{ secrets.FIRMA_PASS }}
         run: gradle assembleDebug --no-daemon
       - name: Renombrar APK
         run: cp app/build/outputs/apk/debug/app-debug.apk LanzadorTV.apk
