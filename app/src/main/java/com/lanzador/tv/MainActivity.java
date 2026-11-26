@@ -2,26 +2,34 @@ package com.lanzador.tv;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ContentUris;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -32,6 +40,9 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -55,7 +66,7 @@ public class MainActivity extends Activity {
         String pkg, label;
         ComponentName cn;
         Drawable img;
-        boolean tv;
+        boolean tv, custom;
     }
 
     static class Section {
@@ -67,6 +78,8 @@ public class MainActivity extends Activity {
     interface NameCallback { void onName(String name); }
 
     private static final String OTHERS = "Aplicaciones";
+    private static final String WALL = "__fondo__";
+    private static final int REQ_PICK = 1, REQ_PERM = 2;
 
     private final Map<String, App> apps = new HashMap<>();
     private final List<Section> sections = new ArrayList<>();
@@ -75,6 +88,9 @@ public class MainActivity extends Activity {
     private LinearLayout rows;
     private TextView clock, date;
     private String focusPkg;
+    private String pickTarget;
+    private ImageView bgImage;
+    private View bgShade;
 
     private final Runnable tick = new Runnable() {
         @Override public void run() {
@@ -95,8 +111,16 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(48), dp(24), dp(48), dp(8));
         root.setClipChildren(false);
-        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
                 new int[]{Color.parseColor("#0B0F1A"), Color.parseColor("#18203A")}));
+        bgImage = new ImageView(this);
+        bgImage.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        frame.addView(bgImage, new FrameLayout.LayoutParams(-1, -1));
+        bgShade = new View(this);
+        bgShade.setBackgroundColor(Color.parseColor("#99000000"));
+        frame.addView(bgShade, new FrameLayout.LayoutParams(-1, -1));
 
         // Cabecera: hora + fecha a la izquierda, botón de secciones a la derecha
         LinearLayout header = new LinearLayout(this);
@@ -117,12 +141,12 @@ public class MainActivity extends Activity {
         header.addView(timeBox, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView settings = new TextView(this);
-        settings.setText("⚙  Secciones");
+        settings.setText("⚙  Ajustes");
         settings.setTextColor(Color.parseColor("#DDDDDD"));
         settings.setTextSize(15);
         settings.setPadding(dp(16), dp(8), dp(16), dp(8));
         makeFocusable(settings, settings);
-        settings.setOnClickListener(v -> manageSections());
+        settings.setOnClickListener(v -> settingsMenu());
         header.addView(settings);
         root.addView(header);
 
@@ -138,7 +162,9 @@ public class MainActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        setContentView(root);
+        frame.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        setContentView(frame);
+        applyBackground();
     }
 
     @Override
@@ -200,8 +226,14 @@ public class MainActivity extends Activity {
             a.label = String.valueOf(ri.loadLabel(pm));
             a.tv = tv;
             Drawable d = null;
+            File cf = iconFile(pkg);
+            if (cf.exists()) {
+                Bitmap b = BitmapFactory.decodeFile(cf.getAbsolutePath());
+                if (b != null) { d = new BitmapDrawable(getResources(), b); a.custom = true; }
+            }
             try {
-                if (tv) {
+                if (d != null) { /* imagen personalizada */ }
+                else if (tv) {
                     d = ai.loadBanner(pm);
                     if (d == null && ai.applicationInfo != null) d = ai.applicationInfo.loadBanner(pm);
                 }
@@ -307,8 +339,8 @@ public class MainActivity extends Activity {
 
         ImageView iv = new ImageView(this);
         iv.setImageDrawable(a.img);
-        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        if (!a.tv) iv.setPadding(dp(22), dp(14), dp(22), dp(14));
+        iv.setScaleType(a.custom ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
+        if (!a.tv && !a.custom) iv.setPadding(dp(22), dp(14), dp(22), dp(14));
         v.addView(iv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(100)));
 
         TextView label = new TextView(this);
@@ -369,6 +401,12 @@ public class MainActivity extends Activity {
             acts.add(() -> shift(cur, a.pkg, 1));
             opts.add("Quitar de «" + cur.name + "»");
             acts.add(() -> { cur.apps.remove(a.pkg); focusPkg = a.pkg; save(); build(); });
+        }
+        opts.add("Cambiar imagen…");
+        acts.add(() -> pickImage(a.pkg));
+        if (a.custom) {
+            opts.add("Restaurar imagen original");
+            acts.add(() -> { iconFile(a.pkg).delete(); focusPkg = a.pkg; reload(); });
         }
         opts.add("Información de la app");
         acts.add(() -> {
@@ -435,6 +473,179 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancelar", null)
                 .show();
+    }
+
+    // ---------- Ajustes ----------
+
+    private void settingsMenu() {
+        List<String> opts = new ArrayList<>();
+        List<Runnable> acts = new ArrayList<>();
+        opts.add("Secciones…");
+        acts.add(this::manageSections);
+        opts.add("Cambiar fondo de pantalla…");
+        acts.add(() -> pickImage(WALL));
+        if (wallFile().exists()) {
+            opts.add("Quitar fondo de pantalla");
+            acts.add(() -> { wallFile().delete(); applyBackground(); });
+        }
+        opts.add("Sustituir inicio: " + (watcherEnabled() ? "ACTIVADO" : "DESACTIVADO"));
+        acts.add(() -> {
+            toast("Activa «Lanzador TV (sustituir inicio)» en la lista");
+            openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        });
+        opts.add("Ajustes del televisor");
+        acts.add(() -> openSettings(Settings.ACTION_SETTINGS));
+        new AlertDialog.Builder(this)
+                .setTitle("Ajustes")
+                .setItems(opts.toArray(new String[0]), (d, w) -> acts.get(w).run())
+                .show();
+    }
+
+    private void openSettings(String action) {
+        try {
+            startActivity(new Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            toast("No disponible en este televisor");
+        }
+    }
+
+    private boolean watcherEnabled() {
+        String s = Settings.Secure.getString(getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        return s != null && s.contains(getPackageName() + "/");
+    }
+
+    // ---------- Imágenes (fondo e iconos personalizados) ----------
+
+    private File iconFile(String pkg) {
+        return new File(new File(getFilesDir(), "iconos"), pkg + ".png");
+    }
+
+    private File wallFile() {
+        return new File(getFilesDir(), "fondo.jpg");
+    }
+
+    private void applyBackground() {
+        File f = wallFile();
+        Bitmap b = f.exists() ? BitmapFactory.decodeFile(f.getAbsolutePath()) : null;
+        bgImage.setImageBitmap(b);
+        bgImage.setVisibility(b != null ? View.VISIBLE : View.GONE);
+        bgShade.setVisibility(b != null ? View.VISIBLE : View.GONE);
+    }
+
+    private String readPermission() {
+        return Build.VERSION.SDK_INT >= 33
+                ? "android.permission.READ_MEDIA_IMAGES"
+                : "android.permission.READ_EXTERNAL_STORAGE";
+    }
+
+    /** Elige una imagen: primero la lista propia (cómoda con el mando), si no, el selector del sistema. */
+    private void pickImage(String target) {
+        pickTarget = target;
+        if (Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(readPermission()) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{readPermission()}, REQ_PERM);
+            return;
+        }
+        ownPicker();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode != REQ_PERM) return;
+        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) ownPicker();
+        else systemPicker();
+    }
+
+    private void ownPicker() {
+        List<String> names = new ArrayList<>();
+        List<Uri> uris = new ArrayList<>();
+        Uri base = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        try (Cursor c = getContentResolver().query(base,
+                new String[]{MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME},
+                null, null, MediaStore.Images.Media.DATE_ADDED + " DESC")) {
+            while (c != null && c.moveToNext() && names.size() < 300) {
+                uris.add(ContentUris.withAppendedId(base, c.getLong(0)));
+                names.add(c.getString(1));
+            }
+        } catch (Exception ignored) { }
+
+        if (names.isEmpty()) {
+            toast("No hay imágenes en el televisor. Abriendo el explorador…");
+            systemPicker();
+            return;
+        }
+        names.add("Buscar en otra carpeta…");
+        new AlertDialog.Builder(this)
+                .setTitle(WALL.equals(pickTarget) ? "Elige el fondo" : "Elige la imagen")
+                .setItems(names.toArray(new String[0]), (d, w) -> {
+                    if (w == uris.size()) systemPicker();
+                    else saveImage(uris.get(w), pickTarget);
+                })
+                .show();
+    }
+
+    private void systemPicker() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE).setType("image/*");
+        try {
+            startActivityForResult(i, REQ_PICK);
+        } catch (Exception e) {
+            try {
+                startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT).setType("image/*"), REQ_PICK);
+            } catch (Exception e2) {
+                toast("Este televisor no tiene explorador de archivos. Pasa la imagen a la carpeta Descargas.");
+            }
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            saveImage(data.getData(), pickTarget);
+        }
+    }
+
+    /** Reduce la imagen y la guarda dentro de la app (no depende de que el archivo original siga ahí). */
+    private void saveImage(Uri uri, String target) {
+        if (target == null) return;
+        final boolean wall = WALL.equals(target);
+        new Thread(() -> {
+            boolean ok = false;
+            try {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    BitmapFactory.decodeStream(in, null, o);
+                }
+                int maxW = wall ? 1920 : 640;
+                int sample = 1;
+                while (o.outWidth / (sample * 2) >= maxW) sample *= 2;
+                BitmapFactory.Options o2 = new BitmapFactory.Options();
+                o2.inSampleSize = sample;
+                Bitmap b;
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    b = BitmapFactory.decodeStream(in, null, o2);
+                }
+                if (b != null) {
+                    File dest = wall ? wallFile() : iconFile(target);
+                    File dir = dest.getParentFile();
+                    if (dir != null) dir.mkdirs();
+                    try (FileOutputStream out = new FileOutputStream(dest)) {
+                        b.compress(wall ? Bitmap.CompressFormat.JPEG : Bitmap.CompressFormat.PNG, 90, out);
+                    }
+                    ok = true;
+                }
+            } catch (Exception ignored) { }
+            final boolean done = ok;
+            handler.post(() -> {
+                if (!done) { toast("No se pudo leer la imagen"); return; }
+                if (wall) applyBackground();
+                else { focusPkg = target; reload(); }
+            });
+        }).start();
     }
 
     // ---------- Datos de secciones ----------
